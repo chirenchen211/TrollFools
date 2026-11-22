@@ -1,4 +1,4 @@
-﻿name: Build TrollFools (patched, tipa)
+name: Build TrollFools (patched, tipa)
 
 # 免费方案：在你 fork 的仓库里用 GitHub 的 macOS runner 编译
 # 产出：TrollFools_xxx.tipa（TrollStore 直接装）+ .deb
@@ -82,9 +82,13 @@ jobs:
           python3 apply.py .
           echo "--- 校验补丁痕迹 ---"
           grep -q "preferredMachOPath" TrollFools/InjectorV3.swift
+          grep -q "InjectionTargetStore" TrollFools/InjectorV3+Persistent.swift
           grep -q "InjectionTargetStore.set" TrollFools/InjectorV3+Inject.swift
-          test -f TrollFools/InjectionTargetStore.swift
-          test -f TrollFools/TargetPickerSheet.swift
+          grep -q "TargetPickerSheet" TrollFools/PlugInCell.swift
+          grep -q "changeTarget" TrollFools/EjectListModel.swift
+          # 不能有残留的独立 .swift（pbxproj 未收录会被编译忽略）
+          test ! -f TrollFools/InjectionTargetStore.swift
+          test ! -f TrollFools/TargetPickerSheet.swift
           echo "补丁校验通过"
 
       - name: Build packages

@@ -1,0 +1,118 @@
+name: Build TrollFools (patched, tipa)
+
+# 免费方案：在你 fork 的仓库里用 GitHub 的 macOS runner 编译
+# 产出：TrollFools_xxx.tipa（TrollStore 直接装）+ .deb
+#
+# 用法：
+#   1. fork https://github.com/Lessica/TrollFools
+#   2. 把 apply.py 放到 fork 根目录
+#   3. 把本文件放到 fork 的 .github/workflows/build-tipa.yml
+#   4. push，然后 Actions → Build TrollFools (patched, tipa) → Run workflow
+#   5. 跑完在 Artifacts 里下 patched-packages
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'apply.py'
+      - '.github/workflows/build-tipa.yml'
+
+env:
+  VERSION: "0.0.0-0"
+
+jobs:
+  build:
+    runs-on: macos-14
+    timeout-minutes: 40
+
+    steps:
+      - name: Setup Xcode 15.4
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: '15.4'
+
+      - name: Checkout TrollFools
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          set -euo pipefail
+          echo "/opt/homebrew/opt/make/libexec/gnubin" >> "$GITHUB_PATH"
+          echo "/usr/local/opt/make/libexec/gnubin" >> "$GITHUB_PATH"
+          HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_INSTALLED_DEPENDENCIES_CHECK=1 \
+            brew install dpkg ldid-procursus make xcbeautify openssl@3
+
+          VERSION_FILE="TrollFools/Version.xcconfig"
+          VERSION_MAIN=$(grep "VERSION" "$VERSION_FILE" | cut -d'=' -f2 | tr -d '[:space:]')
+          VERSION_BUILD=$(grep "BUILD_NUMBER" "$VERSION_FILE" | cut -d'=' -f2 | tr -d '[:space:]')
+          echo "VERSION=${VERSION_MAIN}-${VERSION_BUILD}" >> "$GITHUB_ENV"
+          echo "上游版本：${VERSION_MAIN}-${VERSION_BUILD}"
+
+      - name: Checkout Theos
+        uses: actions/checkout@v4
+        with:
+          repository: theos/theos
+          ref: 942cd0c015f93d8c2d714ba0c69e7f420157c382
+          path: theos
+          submodules: recursive
+
+      - name: Checkout Theos SDKs
+        uses: actions/checkout@v4
+        with:
+          repository: theos/sdks
+          path: theos/sdks
+
+      - name: Configure Theos environment
+        run: |
+          set -euo pipefail
+          echo "THEOS=$GITHUB_WORKSPACE/theos" >> "$GITHUB_ENV"
+          echo "THEOS_PACKAGE_SCHEME=rootless" >> "$GITHUB_ENV"
+          echo "FINALPACKAGE=1" >> "$GITHUB_ENV"
+          echo "PATH=$GITHUB_WORKSPACE/theos/bin:$PATH" >> "$GITHUB_ENV"
+
+      # ---- 关键步骤：打「注入目标可选」补丁 ----
+      - name: Apply injection-target patch
+        run: |
+          set -euo pipefail
+          if [ ! -f apply.py ]; then
+            echo "::error::apply.py 不在仓库根目录，无法打补丁"
+            exit 1
+          fi
+          python3 apply.py . --dry-run
+          python3 apply.py .
+          echo "--- 校验补丁痕迹 ---"
+          grep -q "preferredMachOPath" TrollFools/InjectorV3.swift
+          grep -q "InjectionTargetStore.set" TrollFools/InjectorV3+Inject.swift
+          test -f TrollFools/InjectionTargetStore.swift
+          test -f TrollFools/TargetPickerSheet.swift
+          echo "补丁校验通过"
+
+      - name: Build packages
+        run: |
+          set -euo pipefail
+          make package 2>&1 | tee build.log | tail -60
+          ls -lh packages/ || true
+
+      - name: Collect artifacts
+        if: always()
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          cp packages/*.tipa out/ 2>/dev/null || true
+          cp packages/*.deb  out/ 2>/dev/null || true
+          cp build.log out/ 2>/dev/null || true
+          ls -lh out/
+
+      - name: Upload tipa + deb
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: patched-packages
+          path: out/
+          retention-days: 7
+
+      - name: 构建失败时打印日志
+        if: failure()
+        run: |
+          echo "===== build.log (尾 200 行) ====="
+          tail -200 build.log 2>/dev/null || echo "没有 build.log"

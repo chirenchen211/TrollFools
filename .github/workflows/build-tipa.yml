@@ -1,4 +1,4 @@
-name: Build TrollFools (patched, tipa)
+﻿name: Build TrollFools (patched, tipa)
 
 # 免费方案：在你 fork 的仓库里用 GitHub 的 macOS runner 编译
 # 产出：TrollFools_xxx.tipa（TrollStore 直接装）+ .deb
@@ -22,14 +22,14 @@ env:
 
 jobs:
   build:
-    runs-on: macos-14
+    runs-on: macos-15
     timeout-minutes: 40
 
     steps:
-      - name: Setup Xcode 15.4
+      - name: Setup Xcode 16.4
         uses: maxim-lobanov/setup-xcode@v1
         with:
-          xcode-version: '15.4'
+          xcode-version: '16.4'
 
       - name: Checkout TrollFools
         uses: actions/checkout@v4

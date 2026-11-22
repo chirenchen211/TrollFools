@@ -476,6 +476,202 @@ struct TargetPickerSheet: View {
 
 
 # ---------------------------------------------------------------------------
+# 关键修正：不新建 .swift 文件
+#
+# TrollFools.xcodeproj 是手写 pbxproj，有 TrollFools(App) 和 trollfoolscli(CLI)
+# 两个 target。新建的 .swift 文件不会被自动收录，必须改 pbxproj 才能进 Sources
+# phase —— 否则报 `cannot find 'Xxx' in scope`。
+#
+# 因此把所有新代码内联进「两个 target 都会编译」的已有文件：
+#   InjectionTargetStore → InjectorV3+Persistent.swift（App + CLI 都编译）
+#   TargetPickerSheet    → PlugInCell.swift（仅 App，引用方也在这里）
+# ---------------------------------------------------------------------------
+
+NEW_FILES.clear()
+
+_STORE_CODE = r'''
+
+// MARK: - Injection Target Store
+
+/// 记录「插件文件名 -> 注入目标 Mach-O（相对 .app 根路径）」。
+/// 内联在本文件而非独立文件：trollfoolscli target 也编译 Persistent.swift，
+/// 独立文件需要改 pbxproj 才能被两个 target 同时收录。
+enum InjectionTargetStore {
+    static func fileURL(for bundleIdentifier: String) -> URL {
+        InjectorV3.persistentPlugInsRootURL
+            .appendingPathComponent(bundleIdentifier, isDirectory: true)
+            .appendingPathComponent(".targets.json")
+    }
+
+    static func load(_ bid: String) -> [String: String] {
+        guard let data = try? Data(contentsOf: fileURL(for: bid)),
+              let map = try? JSONDecoder().decode([String: String].self, from: data)
+        else { return [:] }
+        return map
+    }
+
+    static func target(of plugInName: String, bid: String) -> String? {
+        load(bid)[plugInName]
+    }
+
+    static func set(_ target: String, for plugInName: String, bid: String) {
+        var map = load(bid)
+        map[plugInName] = target
+        write(map, bid: bid)
+    }
+
+    static func remove(_ plugInName: String, bid: String) {
+        var map = load(bid)
+        map.removeValue(forKey: plugInName)
+        write(map, bid: bid)
+    }
+
+    private static func write(_ map: [String: String], bid: String) {
+        let url = fileURL(for: bid)
+        try? FileManager.default.createDirectory(
+            at: url.deletingLastPathComponent(),
+            withIntermediateDirectories: true)
+        if let data = try? JSONEncoder().encode(map) {
+            try? data.write(to: url, options: .atomic)
+        }
+    }
+}
+'''
+
+P("TrollFools/InjectorV3+Persistent.swift",
+  """    fileprivate func filteredURLs(_ assetURLs: [URL]) -> [URL] {
+        assetURLs.filter {
+            $0.pathExtension.lowercased() == "bundle" ||
+                $0.pathExtension.lowercased() == "dylib" ||
+                $0.pathExtension.lowercased() == "framework"
+        }
+    }
+}
+""",
+  """    fileprivate func filteredURLs(_ assetURLs: [URL]) -> [URL] {
+        assetURLs.filter {
+            $0.pathExtension.lowercased() == "bundle" ||
+                $0.pathExtension.lowercased() == "dylib" ||
+                $0.pathExtension.lowercased() == "framework"
+        }
+    }
+}
+""" + _STORE_CODE,
+  "InjectorV3+Persistent: 内联 InjectionTargetStore")
+
+
+_SHEET_CODE = r'''
+
+// MARK: - Target Picker
+
+struct TargetPickerSheet: View {
+    let plugIn: InjectedPlugIn
+    let bundleURL: URL
+    let currentTarget: String?
+    let onPick: (String) -> Void
+
+    @Environment(\.presentationMode) private var presentationMode
+
+    private struct Candidate: Identifiable {
+        let id = UUID()
+        let label: String
+        let relativePath: String
+        let isMain: Bool
+    }
+
+    private var candidates: [Candidate] {
+        var out: [Candidate] = []
+
+        let mainName = bundleURL.deletingPathExtension().lastPathComponent
+        out.append(Candidate(label: mainName, relativePath: mainName, isMain: true))
+
+        let frameworks = bundleURL.appendingPathComponent("Frameworks")
+        if let en = FileManager.default.enumerator(
+            at: frameworks,
+            includingPropertiesForKeys: [.isRegularFileKey],
+            options: [.skipsHiddenFiles, .skipsPackageDescendants]
+        ) {
+            while let u = en.nextObject() as? URL {
+                guard let v = try? u.resourceValues(forKeys: [.isRegularFileKey]),
+                      v.isRegularFile == true else { continue }
+                let ext = u.pathExtension.lowercased()
+                if ext == "plist" || ext == "nib" || ext == "strings" { continue }
+                let rel = u.path.replacingOccurrences(of: bundleURL.path + "/", with: "")
+                out.append(Candidate(label: rel, relativePath: rel, isMain: false))
+            }
+        }
+        return out
+    }
+
+    var body: some View {
+        NavigationView {
+            List {
+                Section(header: Text("当前注入目标").font(.footnote)) {
+                    Text(currentTarget ?? "自动")
+                        .font(.callout)
+                        .foregroundColor(.secondary)
+                }
+
+                Section(header: Text("可选项").font(.footnote)) {
+                    ForEach(candidates) { c in
+                        Button {
+                            onPick(c.relativePath)
+                            presentationMode.wrappedValue.dismiss()
+                        } label: {
+                            HStack {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(c.isMain ? "主程序" : "Framework / Dylib")
+                                        .font(.caption2)
+                                        .foregroundColor(.secondary)
+                                    Text(c.label)
+                                        .font(.callout)
+                                        .lineLimit(2)
+                                }
+                                Spacer()
+                                if currentTarget == c.relativePath {
+                                    Image(systemName: "checkmark")
+                                        .foregroundColor(.accentColor)
+                                }
+                            }
+                        }
+                    }
+                }
+
+                Section {
+                    Text("改目标会重新写入 load command，App 需要重新启动。")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                }
+            }
+            .navigationTitle(plugIn.url.lastPathComponent)
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button(NSLocalizedString("Cancel", comment: "")) {
+                        presentationMode.wrappedValue.dismiss()
+                    }
+                }
+            }
+        }
+    }
+}
+'''
+
+P("TrollFools/PlugInCell.swift",
+  """    private func openInFilza() {
+        ejectList.app.appList?.openInFilza(plugIn.url)
+    }
+}
+""",
+  """    private func openInFilza() {
+        ejectList.app.appList?.openInFilza(plugIn.url)
+    }
+}
+""" + _SHEET_CODE,
+  "PlugInCell: 内联 TargetPickerSheet")
+
+
+# ---------------------------------------------------------------------------
 # 执行
 # ---------------------------------------------------------------------------
 
